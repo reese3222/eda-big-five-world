@@ -1,0 +1,662 @@
+---
+title: "Geographic distribution of personalities in the world"
+author: "Donato Riccio"
+date: January 03, 2021
+output: 
+  html_document:
+    theme: sandstone
+    highlight: textmate
+    code_folding: hide
+---
+
+```{r error=FALSE, message=FALSE}
+knitr::opts_chunk$set(fig.width=9, fig.height=7, warning = FALSE) 
+library(tidyverse)
+library(plotly)   
+library(lubridate)
+library(d3treeR)
+library(treemap)
+library(leaflet)
+library(geojsonsf)
+library(sf)
+library(ggridges)
+library(d3r)
+library(streamgraph)
+library(parcoords)
+library(viridis)
+library(patchwork)
+library(hrbrthemes)
+library(fmsb)
+library(colormap)
+```
+
+***
+
+The Big Five Model, also known as the Five-Factor Model, is the most
+widely accepted personality theory held by psychologists today. The
+theory states that personality can be boiled down to five core factors,
+known by the acronym OCEAN:
+
+### Openness to experience
+
+Open people tend to be intellectually curious, creative and imaginative.
+People who score low tend to be traditional and conventional.
+
+### Conscientiousness
+
+Individuals who score high on this factor are careful and diligent. Low
+scorers are impulsive and disorganized.
+
+### Extraversion
+
+Individuals who score high are outgoing and social, and they are more
+comfortable around people. Individuals who score low tend to be reserved
+and shy.
+
+### Agreeableness
+
+A person high in agreeableness is friendly and optimistic. Low scorers
+are critical and aggressive.
+
+### Neuroticism
+
+Individuals who score high on neuroticism are more likely than average
+to be moody and to experience such feelings as anxiety, worry, fear,
+anger, frustration, envy, jealousy, guilt, depressed mood, and
+loneliness.
+
+![](https://www.simplypsychology.org/big-5-scale.png) 
+
+# Personality test 
+The five factors can be measured with a questionnaire. In this
+case, we are using data from International Personality Item Pool (IPIP)
+test. The test consist in 50 questions, each marked positively or
+negatively keyed. Positive ones increase your score, while negatives
+decreases it. For more information about the complete list of questions
+in this dataset refer to [this link.](https://ipip.ori.org/new_ipip-50-item-scale.htm)
+
+This dataset contains 1,015,342 questionnaire answers collected online
+by Open Psychometrics. The full test is available [here](https://openpsychometrics.org/tests/IPIP-BFFM/)
+
+***
+
+# The dataset
+```{r, message=FALSE}
+df = read_tsv("data-final.csv") %>% select(-c(51:100))
+```
+
+The first 50 variables are the answers to each question of the test.
+They are numeric integer variables with range 1-5. 1 meaning the answer
+was "strongly disagree", 5 for "strongly agree".   
+
+Other variables are:  
+- dateload: date and hour of the test   
+- screenh, screenw: size of the screen  
+- introelapse, testelapse, endelapse: how much time the user 
+spent on intro, on the test and on the results.  
+- country: the country the user is from  
+- approximate latitude and longitude of the user.
+
+For my analysis I will focus on the scores, dateload, and country, to
+show how user are distributed in the world.
+
+# Computing scores for each person
+
+### Percentile vs raw scores
+
+I stored the results in the _raw variables. They have a 0-40 range.
+Since test results are always scored in percentile, I computed the
+percentile on my sample to be more consistent with test results. My
+results can vary from 1 to 4% to true scores of the test, because I'm
+computing percentiles on a sample. Ideally, a more appropriate way would be inputing every answer in a real test and see the final scores.
+
+
+```{r}
+#creating a copy of the dataset for the streamgraph
+df1 = df
+
+#Reducing US number of observations, see Account for bias section for an explaination
+dfno = df %>%
+   rownames_to_column('rn') %>%
+   filter(country == "US") 
+
+sample = sample(dfno$rn, 483195, replace = FALSE, prob = NULL)
+df = df  %>% rownames_to_column('rn') %>% filter(!rn %in% sample)
+
+df = df %>% 
+  filter_if(is.numeric, all_vars((.) != 0)) %>% 
+  mutate(O_raw = 8 + OPN1 - OPN2 + OPN3 - OPN4 + OPN5 - OPN6 + OPN7 + OPN8 + OPN9 + OPN10,
+         C_raw = 14 + CSN1 - CSN2 + CSN3 - CSN4 + CSN5 - CSN6 + CSN7 - CSN8 + CSN9 + CSN10,
+         E_raw = 20 + EXT1 - EXT2 + EXT3 - EXT4 + EXT5 - EXT6 + EXT7 - EXT8 + EXT9 - EXT10,
+         A_raw = 14 - AGR1 + AGR2 - AGR3 + AGR4 - AGR5 + AGR6 - AGR7 + AGR8 + AGR9 + AGR10,
+         N_raw = 2 + EST1 - EST2 + EST3 - EST4 + EST5 + EST6 + EST7 + EST8 + EST9 + EST10,
+         O = ntile(O_raw, 100),
+         C = ntile(C_raw, 100),
+         E = ntile(E_raw, 100),
+         A = ntile(A_raw, 100),
+         N = ntile(N_raw, 100),
+         dateload = as.Date(dateload))
+
+```
+
+
+
+I proceed computing each result of the test based on answers. You can
+find the formulae used in the code.
+
+# Calculating the mean score for every country.
+
+```{r echo=FALSE, error=FALSE, warning=FALSE}
+dfcountries = df %>% 
+  group_by(country) %>% 
+  summarize_all(mean, na.rm = TRUE) %>% 
+  select(country,O,C,E,A,N)
+
+```
+
+Now I need to add the full country name and the region name. I'm doing
+that by joining my original dataset with a country code dataset that
+provides me the needed names.
+
+```{r, message=FALSE}
+country_codes = read_csv("country-codes.csv")
+
+country_codes[1, "official_name_en"] <- "Taiwan"
+country_codes[1, "Region Name"] <- "Asia"
+
+country_codes = country_codes %>% 
+  rename("country" = `ISO3166-1-Alpha-2`) %>%  
+  rename("ISO_A3" = `ISO3166-1-Alpha-3`) %>%  
+  select(ISO_A3, official_name_en,country, `Region Name`)
+
+dfcountries = merge(dfcountries, country_codes) %>% 
+  rename("code" = country, "country" = official_name_en, "region" = `Region Name`) 
+dfcontinents = merge(df, country_codes) %>% 
+  rename("code" = country, "country" = official_name_en, "region" = `Region Name`) 
+dfcontinentsfull = merge(df1, country_codes) %>% 
+  rename("code" = country, "country" = official_name_en, "region" = `Region Name`) 
+```
+
+
+I'm using the two letter code country variable as a key to join the two
+datasets. The command merge by default performs an inner join. I will
+also keep the ISO_A3 three letter country code variable for joining the
+geojson data later.
+
+Removing countries with less than 100 observations to have a more accurate data:
+
+```{r}
+lessthan100 = df %>%
+  count(country) %>%
+  filter(n<100)  %>% 
+  rename("code" = country)
+
+dfcountries = dfcountries %>%
+  filter(!code %in% lessthan100$code)
+```
+
+
+
+Fixing some names
+
+```{r}
+dfcountries[105, "country"] <- "Taiwan"
+dfcountries[105, "region"] <- "Asia"
+dfcountries$country = str_replace(dfcountries$country, "The former Yugoslav Republic of Macedonia", "North Macedonia")
+dfcountries$country = str_replace(dfcountries$country, "United States of America", "United States")
+dfcountries$country = str_replace(dfcountries$country, "Republic of Moldova", "Moldova")
+dfcountries$country = str_replace(dfcountries$country, "Czechia", "Czech Republic")
+dfcountries$country = str_replace(dfcountries$country, "Slovakia", "Slovak Republic")
+dfcountries$country = str_replace(dfcountries$country, "Russian Federation", "Russia")
+dfcountries$country = str_replace(dfcountries$country, "Slovakia", "Slovak Republic")
+dfcountries$country = str_replace(dfcountries$country, "United Kingdom of Great Britain and Northern Ireland", "United Kingdom")
+dfcountries$country = str_replace(dfcountries$country, "Republic of Korea", "Korea")
+```
+
+
+### Streamgraph of people taking the test over time in different regions
+
+```{r}
+dfcontinentsfull %>% group_by(region, month=floor_date(dateload, "month")) %>% tally() %>% 
+  streamgraph(key="region", value="n", date="month", height="600px", width="1000px")%>%
+  sg_axis_x(3,"month", "%m/%Y")
+```
+The streamgraph shows that the majority of observations  over time are from Americas and Europe. Very few people are from Africa and Oceania.
+
+### Accounting for the bias in the sample
+
+Since the scores are computed in percentile, we have to account for the bias in our sample. The dataset is not uniform across countries. Half of observation are from US, and counting them all would result in basically comparing everyone to a large extent to US people, and US being very close to 50 percentile in every statistic. 
+I choose to only keep around 50000 observations from US. 
+After also deleting 0 values, that represents when the answer was not provided, the final size of the dataset is 532146 observations.
+
+
+The following treemap shows how people taking the test are distribuited, based on the provived lat and long. The interactivity of this plot allows the user to zoom into a specific region, to see the distribution in that region and the countries with the least number of people.
+
+```{r}
+dfnum = df %>%
+count(country) %>% inner_join(country_codes, by = "country") %>% filter(official_name_en != "Antarctica")  %>% rename("people" = n)
+```
+
+
+```{r  fig.show="hide"}
+p <- treemap(dfnum,
+             index=c("Region Name","ISO_A3"),
+             vSize="people",
+             type="index",
+             palette = "Set2",
+             bg.labels=c("white"),
+             align.labels=list(
+               c("center", "center"), 
+               c("right", "bottom")
+             )  
+           )
+```
+
+```{r}
+inter <- d3tree2( p ,  rootname = "General" )
+htmlwidgets::saveWidget(inter, file="tree.html")
+htmltools::includeHTML("tree.html")
+```
+
+**Findings:**  
+- The majority of people are from Americas and Europe.  
+- There are very few observations in Africa and Ocenia  
+- The number of people in Europe and Asia regions is more uniformely distributed between countries.
+
+## Geographic distribution of personality traits {.tabset}
+
+The following tabs show how each trait is distributed in the world. I choose choroplet maps because they are good at utilizing data to easily represent variability of the desired measurement, across a region. The library leaflet is also very fast and smooth. 
+It works by loading and external .geojson file with shape information of all countries.  
+Then, I proceed by joining geojson data and trait information in a unique  dataset, using ISO_A3 three letter country code as key. This is required because otherwise I will get wrong labels on countries. In order to do that, the file must be loaded in a sf object.
+
+Ridgeline plots are partially overlapping line plots that create the impression of a mountain range. They can be quite useful for both comparing distributions in different regions, and visualizing distribution of personality traits.
+
+And lastly you will find a lollipop plot that shows the ranking of the trait in the Europe region. I choose only the Europe region for this graph because the data is more complete. The lollipops are less visually cluttered compared to bar charts, and they are more visually pleasing if we have a lot of bars to plot.
+
+```{r}
+geojson <- geojsonsf::geojson_sf("countries.geojson")
+geojson = left_join(geojson, dfcountries, by = "ISO_A3")
+```
+
+
+### Openness
+
+**Findings**   
+
+- Europe countries have the most average openness, while Asia have the least.
+- Germany is the most open country, with 60 avg openness.  
+- Cambodia and Malaysia are the least open, with 30 avg openness.  
+- In Asia there are the highest percentage of very low openness people, while in America it's more uniform. Africa line is not very smooth because we have few observations.
+
+```{r}
+bins <- seq(26,62,4)
+pal <- colorBin("PuBu", domain = geojson$ISO_A3, bins = bins)
+
+labels <- sprintf(
+  "<strong>%s</strong><br/>%g avg openness</sup>",
+  geojson$country.x, geojson$O
+) %>% lapply(htmltools::HTML)
+
+leaflet(geojson) %>%
+  setView(0, 37.8, 2) %>% addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons( 
+    fillColor = ~pal(geojson$O),
+    weight = 0.6,
+    opacity = 1,
+    color = "white",
+    dashArray = "3",
+    fillOpacity = 0.7,
+    highlight = highlightOptions(
+      weight = 1,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.7,
+      bringToFront = TRUE),
+    label = labels,
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "15px",
+      direction = "auto")
+    ) %>%
+  addLegend(pal = pal, values = ~density, opacity = 0.7, title = NULL,
+   position = "bottomright")
+```
+
+```{r error=FALSE, message=FALSE}
+dfcontinents %>% drop_na() %>%
+  ggplot(aes(x=O, y=region, fill = region)) +
+    ggtitle("Openness in different regions") +
+    ylab("")+
+    stat_density_ridges(quantile_lines = TRUE) +
+    theme_minimal() +
+    theme(legend.position = "none") 
+```
+
+```{r}
+europe = dfcountries %>% filter(region == "Europe")
+europe$country <- factor(europe$country, levels = europe$country[order(europe$O)])
+ggplot(europe, aes(x=O, y=country)) +
+  xlab("Average openness") + 
+  ylab("")+
+  ggtitle("Openness in Europe countries")+
+  geom_segment( aes(x=45, xend=O, y=country, yend=country), color="blue2") +
+  geom_point( color="blue2", size=2, alpha=1) +
+  theme_light() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+```
+
+
+
+### Conscientiousness
+
+**Findings**  
+- Africa countries are the most conscentious.  
+- Europe countries are the least conscentious.  
+- There is less variance in Asia countries.  
+- In Europe there is the highest concentration of very low C people, while in America it's more constant. In Africa there is the highest contentration of high C people.
+
+```{r}
+bins <- seq(30,66,4)
+pal <- colorBin("YlOrBr", domain = geojson$ISO_A3, bins = bins)
+labels <- sprintf(
+  "<strong>%s</strong><br/>%g avg conscientiousness</sup>",
+  geojson$country.x, geojson$C
+) %>% lapply(htmltools::HTML)
+leaflet(geojson) %>%
+  setView(0, 37.8, 2) %>% addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons( 
+    fillColor = ~pal(geojson$C),
+    weight = 0.6,
+    opacity = 1,
+    color = "white",
+    dashArray = "3",
+    fillOpacity = 0.9,
+    highlight = highlightOptions(
+      weight = 1,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.7,
+      bringToFront = TRUE),
+    label = labels,
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "15px",
+      direction = "auto")) %>%
+  addLegend(pal = pal, values = ~density, opacity = 0.7, title = NULL,
+   position = "bottomright")
+```
+
+```{r error=FALSE, message=FALSE}
+dfcontinents %>% drop_na() %>% 
+  ggplot(aes(x=C, y=region, fill = region)) +
+    ggtitle("Conscentiousness in different regions") +
+    ylab("")+
+    stat_density_ridges(quantile_lines = TRUE) +
+    theme(legend.position = "none") +
+    theme_minimal() +
+    theme(legend.position = "none") 
+```
+
+```{r}
+europe$country <- factor(europe$country, levels = europe$country[order(europe$C)])
+ggplot(europe, aes(x=C, y=country)) +
+  xlab("Average conscentiousness") + 
+  ylab("")+
+  ggtitle("Conscentiousness in Europe countries")+
+  geom_segment( aes(x=40, xend=C, y=country, yend=country), color="tan4") +
+  geom_point( color="tan4", size=2, alpha=1) +
+  theme_light() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+```
+
+### Extraversion
+
+**Findings**  
+- Asia is the lower in E, but there is very little difference in mean between regions.  
+- Every distribution looks pretty uniform, with the exception of Asia countries that have more observations in the 50% range.  
+- In Europe, north region is more extraverted, while east region is more introverted. Central EU contries are average.
+
+```{r}
+bins <- seq(34,62,4)
+pal <- colorBin("OrRd", domain = geojson$ISO_A3, bins = bins)
+labels <- sprintf(
+  "<strong>%s</strong><br/>%g avg extraversion</sup>",
+  geojson$country.x, geojson$E
+) %>% lapply(htmltools::HTML)
+leaflet(geojson) %>%
+  setView(0, 37.8, 2) %>% addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons( 
+    fillColor = ~pal(geojson$E),
+    weight = 0.6,
+    opacity = 1,
+    color = "white",
+    dashArray = "3",
+    fillOpacity = 0.9,
+    highlight = highlightOptions(
+      weight = 1,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.7,
+      bringToFront = TRUE),
+    label = labels,
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "15px",
+      direction = "auto")) %>%
+  addLegend(pal = pal, values = ~density, opacity = 0.7, title = NULL,
+   position = "bottomright")
+```
+
+```{r error=FALSE, message=FALSE}
+dfcontinents %>% drop_na() %>%ggplot(aes(x=E, y=region, fill = region)) +
+    ggtitle("Extraversion in different regions") +
+    ylab("")+
+    stat_density_ridges(quantile_lines = TRUE) +
+    theme_minimal() +
+    theme(legend.position = "none") 
+```
+
+```{r}
+europe$country <- factor(europe$country, levels = europe$country[order(europe$E)])
+ggplot(europe, aes(x=E, y=country)) +
+  xlab("Average extraversion") + 
+  ylab("")+
+  ggtitle("Extraversion in Europe countries")+
+  geom_segment( aes(x=40, xend=E, y=country, yend=country), color="red3") +
+  geom_point( color="red3", size=2, alpha=1) +
+  theme_light() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+```
+
+### Agreableness
+
+**Findings**  
+- The pattern is similar to extraversion. This makes sense because E and A are positively correlated.  
+- Americas is the most agreeable region, Asia is the least.  
+- In Europe there is the highest concentration of very low A people, while in America there is the highest.  
+- In particular, we can see the lowest agreableness in east Europe and south America.
+
+```{r}
+bins <- seq(34,62,4)
+pal <- colorBin("Greens", domain = geojson$ISO_A3, bins = bins)
+labels <- sprintf(
+  "<strong>%s</strong><br/>%g avg agreableness</sup>",
+  geojson$country.x, geojson$A
+) %>% lapply(htmltools::HTML)
+leaflet(geojson) %>%
+  setView(0, 37.8, 2) %>% addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons( 
+    fillColor = ~pal(geojson$A),
+    weight = 0.6,
+    opacity = 1,
+    color = "white",
+    dashArray = "3",
+    fillOpacity = 0.9,
+    highlight = highlightOptions(
+      weight = 1,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.7,
+      bringToFront = TRUE),
+    label = labels,
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "15px",
+      direction = "auto")) %>%
+  addLegend(pal = pal, values = ~density, opacity = 0.7, title = NULL,
+   position = "bottomright")
+```
+
+```{r error=FALSE, message=FALSE}
+dfcontinents %>% drop_na() %>%
+  ggplot(aes(x=A, y=region, fill = region)) +
+    ggtitle("Agreableness in different regions") +
+    ylab("")+
+    stat_density_ridges(quantile_lines = TRUE) +
+    theme_minimal() +
+    theme(legend.position = "none") 
+```
+
+
+```{r}
+europe$country <- factor(europe$country, levels = europe$country[order(europe$A)])
+ggplot(europe, aes(x=A, y=country)) +
+  xlab("Average agreableness") + 
+  ylab("")+
+  ggtitle("Agreableness in Europe countries")+
+  geom_segment( aes(x=30, xend=A, y=country, yend=country), color="green4") +
+  geom_point( color="green4", size=2, alpha=1) +
+  theme_light() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+```
+
+
+### Neuroticism
+
+**Findings**  
+- All distributions look uniform.  
+- Most neurotic countries are in north Africa and south America.
+
+```{r}
+bins <- seq(38,66,4)
+pal <- colorBin("BuPu", domain = geojson$ISO_A3, bins = bins)
+labels <- sprintf(
+  "<strong>%s</strong><br/>%g avg neuroticism</sup>",
+  geojson$country.x, geojson$N
+) %>% lapply(htmltools::HTML)
+leaflet(geojson) %>%
+  setView(0, 37.8, 2) %>% addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons( 
+    fillColor = ~pal(geojson$N),
+    weight = 0.6,
+    opacity = 1,
+    color = "white",
+    dashArray = "3",
+    fillOpacity = 0.9,
+    highlight = highlightOptions(
+      weight = 1,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.7,
+      bringToFront = TRUE),
+    label = labels,
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "15px",
+      direction = "auto")) %>%
+  addLegend(pal = pal, values = ~density, opacity = 0.7, title = NULL,
+   position = "bottomright")
+```
+
+```{r error=FALSE, message=FALSE}
+dfcontinents %>% drop_na() %>%
+  ggplot(aes(x=N, y=region, fill = region)) +
+    ggtitle("Neuroticism in different regions") +
+    ylab("")+
+    stat_density_ridges(quantile_lines = TRUE) +
+    theme_minimal() +
+    theme(legend.position = "none") 
+```
+
+```{r}
+europe$country <- factor(europe$country, levels = europe$country[order(europe$N)])
+ggplot(europe, aes(x=N, y=country)) +
+  xlab("Average neuroticism") + 
+  ylab("")+
+  ggtitle("Neuroticism in Europe countries")+
+  geom_segment( aes(x=42, xend=N, y=country, yend=country), color="purple4") +
+  geom_point( color="purple", size=2, alpha=1) +
+  theme_light() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+```
+
+##  {.unnumbered}
+
+
+# Average personality traits in each region
+
+The following radar plots show the average personality traits in each region on a scale from 40 to 60. I choose this plot because it allows an easy visual comparison of different traits, both within regions and between them.
+
+```{r}
+dfradar1 = dfcountries %>% group_by(region) %>% summarize_all(mean) 
+dfradar = dfcountries %>% group_by(region) %>% summarize_all(mean) %>% select(c(3:7))
+
+# To use the fmsb package, I have to add 2 lines to the dataframe: the max and min of each topic to show on the plot
+dfradar <-rbind(rep(60,10) , rep(40,10) , dfradar)
+
+# Prepare color
+colors_border=colormap(colormap=colormaps$viridis, nshades=6, alpha=1)
+colors_in=colormap(colormap=colormaps$viridis, nshades=6, alpha=0.3)
+
+# Prepare title
+mytitle <- c("Africa", "Americas", "Asia", "Europe", "Oceania")
+
+# Split the screen in 6 parts
+par(mar=rep(0.8,4))
+par(mfrow=c(2,3))
+
+# Loop for each plot
+for(i in 1:5){
+  radarchart( dfradar[c(1,2,i+2),], axistype=1, 
+    pcol=colors_border[i] , pfcol=colors_in[i] , plwd=4, plty=1 , 
+    cglcol="grey", cglty=1, axislabcol="grey", caxislabels=seq(40,60,5), cglwd=0.8,
+    vlcex=0.8,
+    title=mytitle[i]
+    )
+}
+```
+
+**Findings**  
+- Highest O region is Europe, lowest is Asia.  
+- Highest C region is Africa, lowest is Americas.  
+- Asia, Europe and Oceania are all around 50% E, Africa is the most introverted region.  
+- Highest A regions are Africa and Oceania, lowest is Americas.  
+- Asia is the most Neurotic country, but the others are very close.  
+
+# Conclusions
+I hope that this analysis can be useful for explaining some of the differences between people in the world. Both nature and nurture can play a role in personality, although a number of studies suggest that there is a strong genetic component. Personality traits are complex and research suggests that our traits are shaped by both inheritance and environmental factors.
+
+
+
